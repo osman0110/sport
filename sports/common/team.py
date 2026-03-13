@@ -52,9 +52,12 @@ class TeamClassifier:
            batch_size (int): The batch size for processing images.
        """
         self.device = device
+        self.use_fp16 = str(device).lower().startswith('cuda')
         self.batch_size = batch_size
         self.features_model = SiglipVisionModel.from_pretrained(
             SIGLIP_MODEL_PATH).to(device)
+        if self.use_fp16:
+            self.features_model = self.features_model.half()
         self.processor = AutoProcessor.from_pretrained(SIGLIP_MODEL_PATH)
         self.reducer = umap.UMAP(n_components=3)
         self.cluster_model = KMeans(n_clusters=2)
@@ -73,11 +76,16 @@ class TeamClassifier:
         crops = [sv.cv2_to_pillow(crop) for crop in crops]
         batches = create_batches(crops, self.batch_size)
         data = []
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in tqdm(batches, desc='Embedding extraction'):
                 inputs = self.processor(
                     images=batch, return_tensors="pt").to(self.device)
-                outputs = self.features_model(**inputs)
+                with torch.autocast(
+                    device_type='cuda',
+                    dtype=torch.float16,
+                    enabled=self.use_fp16,
+                ):
+                    outputs = self.features_model(**inputs)
                 embeddings = torch.mean(outputs.last_hidden_state, dim=1).cpu().numpy()
                 data.append(embeddings)
 
@@ -110,3 +118,4 @@ class TeamClassifier:
         data = self.extract_features(crops)
         projections = self.reducer.transform(data)
         return self.cluster_model.predict(projections)
+
